@@ -1,0 +1,121 @@
+name: Build SunnySlopes for browser
+
+# Add this file to alocc911/slinggame/.github/workflows/sunnyslopes-web.yml.
+# Run it using GitHub Actions > Build SunnySlopes for browser > Run workflow.
+# publish=false only produces a downloadable, web-ready ZIP artifact.
+# publish=true also updates slinggame/main and its existing GitHub Pages site.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Replace the existing slinggame browser files on main after a successful build?'
+        type: boolean
+        required: true
+        default: false
+
+jobs:
+  build-web:
+    name: Export latest aislingin with Godot 4.7.2
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    container:
+      image: barichello/godot-ci:4.7.2
+    steps:
+      - name: Check out the latest Godot project
+        uses: actions/checkout@v4
+        with:
+          repository: alocc911/aislingin
+          ref: main
+          path: godot-project
+          persist-credentials: false
+
+      - name: Verify Godot and export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --version
+          VERSION=4.7.2.stable
+          TARGET="$HOME/.local/share/godot/export_templates/$VERSION"
+          SOURCE="/root/.local/share/godot/export_templates/$VERSION"
+          if [ ! -d "$TARGET" ]; then
+            mkdir -p "$(dirname "$TARGET")"
+            cp -a "$SOURCE" "$TARGET"
+          fi
+          test -s "$TARGET/web_nothreads_release.zip"
+
+      - name: Import resources and generate Godot cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path godot-project --editor --import
+
+      - name: Export complete web game
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p web-build
+          godot --headless --path godot-project --export-release 'Web' "$GITHUB_WORKSPACE/web-build/index.html"
+          test -s web-build/index.html
+          test -s web-build/index.js
+          test -s web-build/index.wasm
+          test -s web-build/index.pck
+          printf 'Source: alocc911/aislingin\nCommit: %s\nGodot: 4.7.2\n' \
+            "$(git -C godot-project rev-parse HEAD)" > web-build/BUILD_INFO.txt
+          ls -lh web-build/
+
+      - name: Upload complete browser build as ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunnyslopes-browser-build
+          path: web-build/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    name: Publish to slinggame/main (only if selected)
+    if: ${{ inputs.publish == true }}
+    needs: build-web
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out existing browser repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+
+      - name: Download verified build
+        uses: actions/download-artifact@v4
+        with:
+          name: sunnyslopes-browser-build
+          path: web-build
+
+      - name: Replace only the exported game files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s web-build/index.html
+          test -s web-build/index.pck
+          test -s web-build/index.wasm
+          test -s web-build/index.js
+
+          # Remove older Godot export files, but preserve repository settings and workflow.
+          rm -f index.html index.js index.pck index.wasm \
+            index.audio.worklet.js index.audio.position.worklet.js \
+            index.icon.png index.apple-touch-icon.png index.png \
+            index.icon.png.import index.apple-touch-icon.png.import index.png.import
+          cp -a web-build/. ./
+          rm -rf web-build
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'The published files already match the generated build.'
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m 'Export current SunnySlopes Godot project for browser'
+          git push origin HEAD:main
